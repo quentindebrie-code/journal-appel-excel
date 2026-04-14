@@ -210,11 +210,12 @@ def chart_heatmap_intensity(hourly: pd.DataFrame) -> go.Figure:
         texttemplate="%{text}",
         textfont=dict(size=12, color="white"),
     ))
+    layout = dict(**BASE_LAYOUT)
+    layout["margin"] = dict(l=20, r=20, t=44, b=10)
     fig.update_layout(
-        **BASE_LAYOUT,
+        **layout,
         title=dict(text="Heatmap d'intensité horaire", font=dict(size=14, color=NAVY)),
         height=160,
-        margin=dict(l=20, r=20, t=44, b=10),
     )
     return fig
 
