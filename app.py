@@ -300,25 +300,28 @@ def build_excel(records: list[dict], metadata: dict, date_str: str) -> bytes:
     # ── Sheet 1 – Journal ─────────────────────────────────────────────────────
     ws = wb.active; ws.title = "Journal des appels"
     ws.sheet_view.showGridLines = False
+    c = ws.cell(row=1, column=1)
+    c.value = f"HYMPYR — Journal des Appels  ·  {date_str}"
+    c.font = hf(14); c.fill = fl(NH)
+    c.alignment = Alignment(horizontal="center", vertical="center")
     ws.merge_cells("A1:G1")
-    ws["A1"] = f"HYMPYR — Journal des Appels  ·  {date_str}"
-    ws["A1"].font = hf(14); ws["A1"].fill = fl(NH)
-    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[1].height = 36
 
     rep_n  = metadata.get("repondus", sum(1 for r in records if r["Statut"]=="Répondu"))
     tot_n  = metadata.get("total", len(records))
     kpis = [
-        ("A","C", f"Total : {tot_n}", NH),
-        ("C","E", f"Répondus : {rep_n}", GH),
-        ("E","F", f"Sans rép. : {tot_n-rep_n}", RH),
-        ("F","G", f"Taux : {rep_n/max(tot_n,1)*100:.1f}%", OH),
+        (1, 2, f"Total : {tot_n}", NH),
+        (3, 4, f"Répondus : {rep_n}", GH),
+        (5, 6, f"Sans rép. : {tot_n-rep_n}", RH),
+        (7, 7, f"Taux : {rep_n/max(tot_n,1)*100:.1f}%", OH),
     ]
-    for c1, c2, txt, fc in kpis:
-        ws.merge_cells(f"{c1}2:{c2}2")
-        ws[f"{c1}2"] = txt; ws[f"{c1}2"].font = hf()
-        ws[f"{c1}2"].fill = fl(fc)
-        ws[f"{c1}2"].alignment = Alignment(horizontal="center", vertical="center")
+    for col_start, col_end, txt, fc in kpis:
+        cell = ws.cell(row=2, column=col_start)
+        cell.value = txt; cell.font = hf()
+        cell.fill = fl(fc)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        if col_end > col_start:
+            ws.merge_cells(start_row=2, start_column=col_start, end_row=2, end_column=col_end)
     ws.row_dimensions[2].height = 26; ws.row_dimensions[3].height = 4
 
     headers    = ["Statut","Heure début","Heure fin","Adresse / Client","Téléphone","Durée","Absent répertoire"]
@@ -351,18 +354,22 @@ def build_excel(records: list[dict], metadata: dict, date_str: str) -> bytes:
         ws.row_dimensions[ri].height = 17
 
     total_row = len(records) + 5
+    ct = ws.cell(row=total_row, column=1)
+    ct.value = f"TOTAL : {len(records)} appels"
+    # merge after setting value
     ws.merge_cells(f"A{total_row}:G{total_row}")
-    ws[f"A{total_row}"] = f"TOTAL : {len(records)} appels"
-    ws[f"A{total_row}"].font = hf(); ws[f"A{total_row}"].fill = fl(NH)
-    ws[f"A{total_row}"].alignment = Alignment(horizontal="center", vertical="center")
-    ws[f"A{total_row}"].border = bb; ws.row_dimensions[total_row].height = 20
+    ct.font = hf(); ct.fill = fl(NH)
+    ct.alignment = Alignment(horizontal="center", vertical="center")
+    ct.border = bb; ws.row_dimensions[total_row].height = 20
     ws.auto_filter.ref = f"A4:G{total_row-1}"
 
     # ── Sheet 2 – Synthèse ────────────────────────────────────────────────────
     ws2 = wb.create_sheet("Synthèse"); ws2.sheet_view.showGridLines = False
-    ws2.merge_cells("A1:D1"); ws2["A1"] = "Synthèse — Journal des Appels"
-    ws2["A1"].font = hf(13); ws2["A1"].fill = fl(NH)
-    ws2["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    c2t = ws2.cell(row=1, column=1)
+    c2t.value = "Synthèse — Journal des Appels"
+    c2t.font = hf(13); c2t.fill = fl(NH)
+    c2t.alignment = Alignment(horizontal="center", vertical="center")
+    ws2.merge_cells("A1:D1")
     ws2.row_dimensions[1].height = 32
     for col, w in [("A",2),("B",30),("C",20),("D",2)]:
         ws2.column_dimensions[col].width = w
@@ -395,14 +402,16 @@ def build_excel(records: list[dict], metadata: dict, date_str: str) -> bytes:
         if h: (ho if r["Statut"]=="Répondu" else hk)[h] += 1
     all_h = sorted(set(list(ho.keys()) + list(hk.keys())))
     sr = 11
-    ws2.merge_cells(f"B{sr}:D{sr}"); ws2[f"B{sr}"] = "Répartition horaire"
-    ws2[f"B{sr}"].font = hf(); ws2[f"B{sr}"].fill = fl(OH)
-    ws2[f"B{sr}"].alignment = Alignment(horizontal="center"); ws2[f"B{sr}"].border = bd
+    csr = ws2.cell(row=sr, column=2)
+    csr.value = "Répartition horaire"
+    csr.font = hf(); csr.fill = fl(OH)
+    csr.alignment = Alignment(horizontal="center"); csr.border = bd
+    ws2.merge_cells(f"B{sr}:D{sr}")
     for j, h in enumerate(["Heure","Répondus","Sans réponse"], 2):
         c = ws2.cell(sr+1, j, h); c.font = hf(); c.fill = fl(NH)
         c.alignment = Alignment(horizontal="center"); c.border = bd
     for k, h in enumerate(all_h, sr+2):
-        ws2.cell(k,2,f"{h}h").font = cf(bold=True)
+        ws2.cell(k,2,f"{h}h").font = cf(b=True)
         ws2.cell(k,2).fill = fl(GB); ws2.cell(k,2).alignment = Alignment(horizontal="center"); ws2.cell(k,2).border = bd
         for col, val in [(3, ho.get(h,0)), (4, hk.get(h,0))]:
             ws2.cell(k,col,val).fill = fl(WH)
@@ -411,10 +420,11 @@ def build_excel(records: list[dict], metadata: dict, date_str: str) -> bytes:
 
     # ── Sheet 3 – Multi-appels ────────────────────────────────────────────────
     ws3 = wb.create_sheet("Clients multi-appels"); ws3.sheet_view.showGridLines = False
+    c3t = ws3.cell(row=1, column=1)
+    c3t.value = "Clients ayant appelé plusieurs fois dans la journée"
+    c3t.font = hf(12); c3t.fill = fl(OH)
+    c3t.alignment = Alignment(horizontal="center", vertical="center"); ws3.row_dimensions[1].height = 30
     ws3.merge_cells("A1:F1")
-    ws3["A1"] = "Clients ayant appelé plusieurs fois dans la journée"
-    ws3["A1"].font = hf(12); ws3["A1"].fill = fl(OH)
-    ws3["A1"].alignment = Alignment(horizontal="center", vertical="center"); ws3.row_dimensions[1].height = 30
     df_tmp   = pd.DataFrame(records)
     cli_grp  = df_tmp.groupby("Téléphone").agg(
         Nom=("Adresse / Client","first"),
@@ -441,9 +451,11 @@ def build_excel(records: list[dict], metadata: dict, date_str: str) -> bytes:
 
     # ── Sheet 4 – Numéros inconnus ────────────────────────────────────────────
     ws4 = wb.create_sheet("Numéros inconnus"); ws4.sheet_view.showGridLines = False
-    ws4.merge_cells("A1:C1"); ws4["A1"] = "Numéros absents du répertoire"
-    ws4["A1"].font = hf(12); ws4["A1"].fill = fl(RH)
-    ws4["A1"].alignment = Alignment(horizontal="center", vertical="center"); ws4.row_dimensions[1].height = 30
+    c4t = ws4.cell(row=1, column=1)
+    c4t.value = "Numéros absents du répertoire"
+    c4t.font = hf(12); c4t.fill = fl(RH)
+    c4t.alignment = Alignment(horizontal="center", vertical="center"); ws4.row_dimensions[1].height = 30
+    ws4.merge_cells("A1:C1")
     unknowns = [r for r in records if r["Absent répertoire"] == "Oui"]
     for j, h in enumerate(["Statut","Heure début","Téléphone"], 1):
         c = ws4.cell(2,j,h); c.font=hf(); c.fill=fl(NH)
