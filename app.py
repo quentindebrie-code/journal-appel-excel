@@ -3,71 +3,74 @@ import pdfplumber
 import re
 import io
 import pandas as pd
+import plotly.graph_objects as go
+from collections import Counter
 from openpyxl import Workbook
-from openpyxl.styles import (
-    Font, PatternFill, Alignment, Border, Side, GradientFill
-)
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-from openpyxl.chart import BarChart, Reference
-from openpyxl.chart.series import DataPoint
-import tempfile
-import os
 
-# ─── Page config ────────────────────────────────────────────────────────────
+# ─── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Journal des Appels → Excel",
+    page_title="Journal des Appels — Hympyr",
     page_icon="📞",
     layout="wide",
 )
 
-# ─── Custom CSS ─────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-    .main { background: #f8f9fa; }
-    .stApp { font-family: 'Segoe UI', sans-serif; }
-    h1 { color: #1a237e; font-weight: 700; }
+    .stApp { font-family: 'Segoe UI', sans-serif; background: #f4f6fb; }
+    h1, h2, h3 { color: #1a237e; }
     .metric-card {
-        background: white;
-        border-radius: 12px;
-        padding: 20px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-        text-align: center;
+        background: white; border-radius: 14px; padding: 22px 12px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.07); text-align: center;
     }
-    .metric-value { font-size: 2rem; font-weight: 700; color: #1a237e; }
-    .metric-label { font-size: 0.85rem; color: #666; margin-top: 4px; }
-    .status-ok { color: #2e7d32; font-weight: 600; }
-    .status-ko { color: #c62828; font-weight: 600; }
+    .metric-value { font-size: 2.1rem; font-weight: 800; }
+    .metric-label { font-size: 0.82rem; color: #777; margin-top: 5px;
+        text-transform: uppercase; letter-spacing: .04em; }
+    .section-title {
+        font-size: 1.15rem; font-weight: 700; color: #1a237e;
+        border-left: 4px solid #e65100; padding-left: 10px;
+        margin: 28px 0 14px 0;
+    }
+    .alert-badge {
+        background: #fff3e0; border: 1.5px solid #e65100; border-radius: 8px;
+        padding: 12px 16px; font-size: 0.9rem; color: #bf360c; line-height: 1.7;
+    }
+    .client-urgent {
+        background: #fce4ec; border-left: 4px solid #c62828;
+        padding: 10px 14px; border-radius: 6px;
+        font-size: 0.88rem; line-height: 1.5;
+    }
 </style>
 """, unsafe_allow_html=True)
 
+NAVY   = "#1a237e"
+ORANGE = "#e65100"
+GREEN  = "#2e7d32"
+RED    = "#c62828"
 
-# ─── PDF Parsing ─────────────────────────────────────────────────────────────
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+def duration_to_seconds(d: str) -> int:
+    if not d:
+        return 0
+    parts = d.split(":")
+    try:
+        return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+    except Exception:
+        return 0
+
+def fmt_seconds(s: int) -> str:
+    m, sec = divmod(int(s), 60)
+    return f"{m}m {sec:02d}s"
+
+# ─── PDF Parsing ──────────────────────────────────────────────────────────────
 def parse_pdf(file_bytes: bytes) -> tuple[list[dict], dict]:
-    """
-    Extract call records from a Logimatique 'Journal des Appels' PDF.
-    Returns (records, metadata).
-    """
     records = []
     metadata = {}
-
-    # Regex for answered calls:  X  HH:MM  HH:MM  <name>  <phone>  H:MM:SS
-    re_answered = re.compile(
-        r'^X\s+'
-        r'(\d{2}:\d{2})\s+'          # début
-        r'(\d{2}:\d{2})\s+'          # fin
-        r'(.+?)\s+'                  # adresse
-        r'(\d[\d\s]{9,14})\s+'       # téléphone
-        r'(\d+:\d{2}:\d{2})\s*$'     # durée
-    )
-    # Regex for unanswered calls:  HH:MM  <name>  <phone>  (no duration)
-    re_unanswered = re.compile(
-        r'^(\d{2}:\d{2})\s+'
-        r'(.+?)\s+'
-        r'(\d[\d\s]{9,14})\s*$'
-    )
-    # Metadata header
-    re_date = re.compile(r'du:\s*(\d{2}/\d{2}/\d{4})')
-    re_society = re.compile(r'Société:\s*(\S+)')
+    re_answered   = re.compile(r'^X\s+(\d{2}:\d{2})\s+(\d{2}:\d{2})\s+(.+?)\s+(\d[\d\s]{9,14})\s+(\d+:\d{2}:\d{2})\s*$')
+    re_unanswered = re.compile(r'^(\d{2}:\d{2})\s+(.+?)\s+(\d[\d\s]{9,14})\s*$')
+    re_date       = re.compile(r'du:\s*(\d{2}/\d{2}/\d{4})')
+    re_society    = re.compile(r'Société:\s*(\S+)')
 
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         for page in pdf.pages:
@@ -76,416 +79,545 @@ def parse_pdf(file_bytes: bytes) -> tuple[list[dict], dict]:
                 line = raw_line.strip()
                 if not line:
                     continue
-
-                # Meta
-                m = re_date.search(line)
-                if m:
-                    metadata.setdefault("date", m.group(1))
-                m = re_society.search(line)
-                if m:
-                    metadata.setdefault("societe", m.group(1))
-
-                # Summary line
+                m = re_date.search(line);    
+                if m: metadata.setdefault("date", m.group(1))
+                m = re_society.search(line); 
+                if m: metadata.setdefault("societe", m.group(1))
                 m = re.search(r"Nombre d'Appels Répondus\s+(\d+)", line)
-                if m:
-                    metadata["repondus"] = int(m.group(1))
+                if m: metadata["repondus"] = int(m.group(1))
                 m = re.search(r"Nombre d'Appels Sans Réponse\s+(\d+)", line)
-                if m:
-                    metadata["sans_reponse"] = int(m.group(1))
+                if m: metadata["sans_reponse"] = int(m.group(1))
                 m = re.search(r"Nombre d'Appels Total\s+(\d+)", line)
-                if m:
-                    metadata["total"] = int(m.group(1))
+                if m: metadata["total"] = int(m.group(1))
 
-                # Answered
                 m = re_answered.match(line)
                 if m:
                     debut, fin, adresse, telephone, duree = m.groups()
                     telephone = telephone.strip()
                     absent = "<Absent" in adresse
+                    clean_addr = re.sub(r'\s*<Absent[^>]*>', '', adresse).strip()
                     records.append({
                         "Statut": "Répondu",
                         "Heure début": debut,
                         "Heure fin": fin,
-                        "Adresse / Client": adresse.replace(" <Absent dans HY - DL>", "").strip(),
+                        "Heure (int)": int(debut[:2]),
+                        "Adresse / Client": clean_addr,
                         "Téléphone": telephone,
                         "Durée": duree,
+                        "Durée (s)": duration_to_seconds(duree),
                         "Absent répertoire": "Oui" if absent else "Non",
                     })
                     continue
 
-                # Unanswered
                 m = re_unanswered.match(line)
                 if m:
                     debut, adresse, telephone = m.groups()
                     telephone = telephone.strip()
                     absent = "<Absent" in adresse
+                    clean_addr = re.sub(r'\s*<Absent[^>]*>', '', adresse).strip()
                     records.append({
                         "Statut": "Sans réponse",
                         "Heure début": debut,
                         "Heure fin": "",
-                        "Adresse / Client": adresse.replace(" <Absent dans HY - DL>", "").strip(),
+                        "Heure (int)": int(debut[:2]),
+                        "Adresse / Client": clean_addr,
                         "Téléphone": telephone,
                         "Durée": "",
+                        "Durée (s)": 0,
                         "Absent répertoire": "Oui" if absent else "Non",
                     })
-
     return records, metadata
 
+# ─── Analytics ───────────────────────────────────────────────────────────────
+def build_hourly_df(df: pd.DataFrame) -> pd.DataFrame:
+    all_hours = list(range(df["Heure (int)"].min(), df["Heure (int)"].max() + 1))
+    rep = df[df["Statut"] == "Répondu"].groupby("Heure (int)").size()
+    sr  = df[df["Statut"] == "Sans réponse"].groupby("Heure (int)").size()
+    result = pd.DataFrame({"Heure": all_hours})
+    result["Répondus"]     = result["Heure"].map(rep).fillna(0).astype(int)
+    result["Sans réponse"] = result["Heure"].map(sr).fillna(0).astype(int)
+    result["Total"]        = result["Répondus"] + result["Sans réponse"]
+    result["Taux réponse"] = (result["Répondus"] / result["Total"].replace(0, 1) * 100).round(1)
+    result["Label"]        = result["Heure"].apply(lambda h: f"{h:02d}h")
+    return result
+
+def build_client_df(df: pd.DataFrame) -> pd.DataFrame:
+    grp = df.groupby("Téléphone").agg(
+        Nom=("Adresse / Client", "first"),
+        Appels=("Statut", "count"),
+        Répondus=("Statut", lambda x: (x == "Répondu").sum()),
+        Durée_totale_s=("Durée (s)", "sum"),
+        Première_heure=("Heure début", "min"),
+        Dernière_heure=("Heure début", "max"),
+    ).reset_index()
+    grp["Sans réponse"]   = grp["Appels"] - grp["Répondus"]
+    grp["Durée totale"]   = grp["Durée_totale_s"].apply(fmt_seconds)
+    grp["Taux réponse %"] = (grp["Répondus"] / grp["Appels"] * 100).round(0).astype(int)
+    return grp.sort_values("Appels", ascending=False).reset_index(drop=True)
+
+# ─── Charts ───────────────────────────────────────────────────────────────────
+BASE_LAYOUT = dict(
+    font_family="Segoe UI",
+    paper_bgcolor="white",
+    plot_bgcolor="white",
+    margin=dict(l=20, r=20, t=44, b=20),
+)
+
+def chart_hourly_bars(hourly: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        name="Répondus", x=hourly["Label"], y=hourly["Répondus"],
+        marker_color=GREEN,
+        text=hourly["Répondus"], textposition="inside",
+        textfont=dict(color="white", size=10),
+    ))
+    fig.add_trace(go.Bar(
+        name="Sans réponse", x=hourly["Label"], y=hourly["Sans réponse"],
+        marker_color=RED,
+        text=hourly["Sans réponse"], textposition="inside",
+        textfont=dict(color="white", size=10),
+    ))
+    fig.add_trace(go.Scatter(
+        name="Taux de réponse (%)",
+        x=hourly["Label"], y=hourly["Taux réponse"],
+        mode="lines+markers", yaxis="y2",
+        line=dict(color=ORANGE, width=2.5, dash="dot"),
+        marker=dict(size=7, color=ORANGE),
+    ))
+    fig.update_layout(
+        **BASE_LAYOUT,
+        title=dict(text="Charge horaire & taux de réponse", font=dict(size=14, color=NAVY)),
+        barmode="stack",
+        legend=dict(orientation="h", y=-0.2),
+        yaxis=dict(title="Nombre d'appels", gridcolor="#eeeeee"),
+        yaxis2=dict(
+            title="Taux (%)", overlaying="y", side="right",
+            range=[0, 115], ticksuffix="%", showgrid=False,
+        ),
+        height=390,
+    )
+    return fig
+
+def chart_heatmap_intensity(hourly: pd.DataFrame) -> go.Figure:
+    z = [hourly["Total"].tolist()]
+    x = hourly["Label"].tolist()
+    fig = go.Figure(go.Heatmap(
+        z=z, x=x, y=[""],
+        colorscale=[[0, "#e8f5e9"], [0.35, "#66bb6a"], [0.65, "#e65100"], [1, "#b71c1c"]],
+        showscale=True,
+        colorbar=dict(title="Appels", thickness=12, len=0.8),
+        text=[[str(v) for v in hourly["Total"].tolist()]],
+        texttemplate="%{text}",
+        textfont=dict(size=12, color="white"),
+    ))
+    fig.update_layout(
+        **BASE_LAYOUT,
+        title=dict(text="Heatmap d'intensité horaire", font=dict(size=14, color=NAVY)),
+        height=160,
+        margin=dict(l=20, r=20, t=44, b=10),
+    )
+    return fig
+
+def chart_top_clients(client_df: pd.DataFrame, n: int = 15) -> go.Figure:
+    top = client_df.head(n).copy().sort_values("Appels")
+    top["Nom court"] = top["Nom"].apply(lambda x: (x[:32] + "…") if len(x) > 32 else x)
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        name="Répondus", y=top["Nom court"], x=top["Répondus"],
+        orientation="h", marker_color=GREEN,
+        text=top["Répondus"], textposition="inside",
+        textfont=dict(color="white", size=10),
+    ))
+    fig.add_trace(go.Bar(
+        name="Sans réponse", y=top["Nom court"], x=top["Sans réponse"],
+        orientation="h", marker_color=RED,
+        text=top["Sans réponse"].apply(lambda v: str(v) if v > 0 else ""),
+        textposition="inside", textfont=dict(color="white", size=10),
+    ))
+    fig.update_layout(
+        **BASE_LAYOUT,
+        title=dict(text=f"Top {n} appelants", font=dict(size=14, color=NAVY)),
+        barmode="stack",
+        height=max(360, n * 32),
+        legend=dict(orientation="h", y=-0.1),
+        xaxis=dict(title="Nombre d'appels", gridcolor="#eeeeee"),
+        yaxis=dict(tickfont=dict(size=10)),
+    )
+    return fig
+
+def chart_bubble_multi(client_df: pd.DataFrame) -> go.Figure | None:
+    multi = client_df[client_df["Appels"] > 1].copy()
+    if multi.empty:
+        return None
+    multi["Nom court"]    = multi["Nom"].apply(lambda x: (x[:26] + "…") if len(x) > 26 else x)
+    multi["bubble_size"]  = (multi["Durée_totale_s"] / 25).clip(lower=8, upper=55)
+    fig = go.Figure(go.Scatter(
+        x=multi["Appels"],
+        y=multi["Taux réponse %"],
+        mode="markers+text",
+        text=multi["Nom court"],
+        textposition="top center",
+        textfont=dict(size=9),
+        marker=dict(
+            size=multi["bubble_size"],
+            color=multi["Taux réponse %"],
+            colorscale=[[0, RED], [0.5, ORANGE], [1, GREEN]],
+            showscale=True,
+            colorbar=dict(title="Taux<br>réponse %", thickness=12, len=0.6),
+            line=dict(color="white", width=1.5),
+        ),
+        hovertemplate=(
+            "<b>%{text}</b><br>Appels : %{x}<br>Taux réponse : %{y}%<extra></extra>"
+        ),
+    ))
+    fig.add_hline(y=50, line_dash="dot", line_color=ORANGE,
+                  annotation_text="seuil 50 %", annotation_font_size=10)
+    fig.update_layout(
+        **BASE_LAYOUT,
+        title=dict(text="Clients multi-appels — Intensité vs qualité de traitement",
+                   font=dict(size=14, color=NAVY)),
+        xaxis=dict(title="Appels dans la journée", gridcolor="#eeeeee", dtick=1),
+        yaxis=dict(title="Taux de réponse (%)", range=[-5, 115], gridcolor="#eeeeee"),
+        height=430,
+    )
+    return fig
 
 # ─── Excel Builder ────────────────────────────────────────────────────────────
 def build_excel(records: list[dict], metadata: dict, date_str: str) -> bytes:
     wb = Workbook()
+    NH = "1A237E"; OH = "E65100"; GH = "2E7D32"; RH = "C62828"
+    WH = "FFFFFF"; GB = "F5F5F5"; GL = "BDBDBD"; LB = "EEF2FF"
+    thin  = Side(border_style="thin",   color=GL)
+    thick = Side(border_style="medium", color=NH)
+    bd = Border(left=thin, right=thin, top=thin,  bottom=thin)
+    bt = Border(left=thin, right=thin, top=thick, bottom=thin)
+    bb = Border(left=thin, right=thin, top=thin,  bottom=thick)
+    def hf(sz=10, c=WH): return Font(name="Arial", bold=True, size=sz, color=c)
+    def cf(sz=9, b=False, c="212121"): return Font(name="Arial", bold=b, size=sz, color=c)
+    def fl(h): return PatternFill("solid", fgColor=h)
 
-    # ── Palette ──────────────────────────────────────────────────────────────
-    NAVY      = "1A237E"
-    ORANGE    = "E65100"
-    GREEN     = "2E7D32"
-    RED_SOFT  = "C62828"
-    LIGHT_BG  = "EEF2FF"
-    WHITE     = "FFFFFF"
-    GREY_BG   = "F5F5F5"
-    GREY_LINE = "BDBDBD"
-
-    thin  = Side(border_style="thin",   color=GREY_LINE)
-    thick = Side(border_style="medium", color=NAVY)
-    border_data  = Border(left=thin, right=thin, top=thin, bottom=thin)
-    border_top   = Border(left=thin, right=thin, top=thick, bottom=thin)
-    border_bottom= Border(left=thin, right=thin, top=thin, bottom=thick)
-
-    def hdr_font(size=10, bold=True, color=WHITE):
-        return Font(name="Arial", bold=bold, size=size, color=color)
-
-    def cell_font(size=9, bold=False, color="212121"):
-        return Font(name="Arial", bold=bold, size=size, color=color)
-
-    def fill(hex_color):
-        return PatternFill("solid", fgColor=hex_color)
-
-    # ── Sheet 1 – Journal complet ─────────────────────────────────────────────
-    ws = wb.active
-    ws.title = "Journal des appels"
+    # ── Sheet 1 – Journal ─────────────────────────────────────────────────────
+    ws = wb.active; ws.title = "Journal des appels"
     ws.sheet_view.showGridLines = False
-
-    # Title block
     ws.merge_cells("A1:G1")
-    ws["A1"] = f"📞  HYMPYR — Journal des Appels  ·  {date_str}"
-    ws["A1"].font = Font(name="Arial", bold=True, size=14, color=WHITE)
-    ws["A1"].fill = fill(NAVY)
+    ws["A1"] = f"HYMPYR — Journal des Appels  ·  {date_str}"
+    ws["A1"].font = hf(14); ws["A1"].fill = fl(NH)
     ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[1].height = 36
 
-    # KPI row
-    kpi_labels = [
-        ("Total appels",     metadata.get("total",        len(records))),
-        ("Répondus",         metadata.get("repondus",     sum(1 for r in records if r["Statut"]=="Répondu"))),
-        ("Sans réponse",     metadata.get("sans_reponse", sum(1 for r in records if r["Statut"]=="Sans réponse"))),
-        ("Taux de réponse",  f"{metadata.get('repondus',0) / max(metadata.get('total',1),1)*100:.1f} %"),
+    rep_n  = metadata.get("repondus", sum(1 for r in records if r["Statut"]=="Répondu"))
+    tot_n  = metadata.get("total", len(records))
+    kpis = [
+        ("A","C", f"Total : {tot_n}", NH),
+        ("C","E", f"Répondus : {rep_n}", GH),
+        ("E","F", f"Sans rép. : {tot_n-rep_n}", RH),
+        ("F","G", f"Taux : {rep_n/max(tot_n,1)*100:.1f}%", OH),
     ]
-    ws.merge_cells("A2:B2"); ws.merge_cells("C2:D2")
-    ws.merge_cells("E2:F2"); ws.merge_cells("G2:G2")
-    kpi_cols = ["A", "C", "E", "G"]
-    kpi_fills = [NAVY, ORANGE, RED_SOFT, GREEN]
-    for i, ((label, val), col, fc) in enumerate(zip(kpi_labels, kpi_cols, kpi_fills)):
-        ws[f"{col}2"] = f"{label}: {val}"
-        ws[f"{col}2"].font = Font(name="Arial", bold=True, size=10, color=WHITE)
-        ws[f"{col}2"].fill = fill(fc)
-        ws[f"{col}2"].alignment = Alignment(horizontal="center", vertical="center")
-    ws.row_dimensions[2].height = 28
+    for c1, c2, txt, fc in kpis:
+        ws.merge_cells(f"{c1}2:{c2}2")
+        ws[f"{c1}2"] = txt; ws[f"{c1}2"].font = hf()
+        ws[f"{c1}2"].fill = fl(fc)
+        ws[f"{c1}2"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[2].height = 26; ws.row_dimensions[3].height = 4
 
-    ws.row_dimensions[3].height = 6  # spacer
+    headers    = ["Statut","Heure début","Heure fin","Adresse / Client","Téléphone","Durée","Absent répertoire"]
+    col_widths = [14, 12, 10, 44, 18, 10, 18]
+    for ci, (h, w) in enumerate(zip(headers, col_widths), 1):
+        c = ws.cell(4, ci, h); c.font = hf(); c.fill = fl(NH)
+        c.alignment = Alignment(horizontal="center", vertical="center"); c.border = bt
+        ws.column_dimensions[get_column_letter(ci)].width = w
+    ws.row_dimensions[4].height = 22; ws.freeze_panes = "A5"
 
-    # Column headers
-    headers = ["Statut", "Heure début", "Heure fin", "Adresse / Client", "Téléphone", "Durée", "Absent répertoire"]
-    col_widths = [14, 13, 11, 42, 18, 10, 18]
-    for col_idx, (h, w) in enumerate(zip(headers, col_widths), start=1):
-        cell = ws.cell(row=4, column=col_idx, value=h)
-        cell.font = hdr_font()
-        cell.fill = fill(NAVY)
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        cell.border = border_top
-        ws.column_dimensions[get_column_letter(col_idx)].width = w
-    ws.row_dimensions[4].height = 22
-    ws.freeze_panes = "A5"
-
-    # Data rows
-    for row_idx, rec in enumerate(records, start=5):
+    for ri, rec in enumerate(records, 5):
         answered = rec["Statut"] == "Répondu"
-        row_fill = fill(WHITE) if row_idx % 2 == 0 else fill(GREY_BG)
-        for col_idx, key in enumerate(headers, start=1):
+        bg = fl(WH) if ri % 2 == 0 else fl(GB)
+        for ci, key in enumerate(headers, 1):
             val = rec.get(key, "")
-            cell = ws.cell(row=row_idx, column=col_idx, value=val)
-            cell.font = cell_font()
-            cell.fill = row_fill
+            cell = ws.cell(ri, ci, val)
+            cell.fill = bg; cell.border = bd; cell.font = cf()
             cell.alignment = Alignment(vertical="center")
-            cell.border = border_data
-
-            # Statut coloring
-            if col_idx == 1:
-                if answered:
-                    cell.font = Font(name="Arial", size=9, bold=True, color=GREEN)
-                else:
-                    cell.font = Font(name="Arial", size=9, bold=True, color=RED_SOFT)
+            if ci == 1:
+                cell.font = cf(b=True, c=GH if answered else RH)
                 cell.alignment = Alignment(horizontal="center", vertical="center")
-
-            # Phone column – centered mono
-            if col_idx == 5:
-                cell.font = Font(name="Courier New", size=9, color="212121")
+            if ci == 5:
+                cell.font = Font(name="Courier New", size=9)
                 cell.alignment = Alignment(horizontal="center", vertical="center")
-
-            # Times – center
-            if col_idx in (2, 3, 6):
+            if ci in (2, 3, 6):
                 cell.alignment = Alignment(horizontal="center", vertical="center")
-
-            # Absent – center + color
-            if col_idx == 7:
+            if ci == 7 and val == "Oui":
+                cell.font = cf(c=RH)
                 cell.alignment = Alignment(horizontal="center", vertical="center")
-                if val == "Oui":
-                    cell.font = Font(name="Arial", size=9, color=RED_SOFT)
+        ws.row_dimensions[ri].height = 17
 
-        ws.row_dimensions[row_idx].height = 18
-
-    # Total row
     total_row = len(records) + 5
-    ws.merge_cells(f"A{total_row}:C{total_row}")
+    ws.merge_cells(f"A{total_row}:G{total_row}")
     ws[f"A{total_row}"] = f"TOTAL : {len(records)} appels"
-    ws[f"A{total_row}"].font = Font(name="Arial", bold=True, size=9, color=WHITE)
-    ws[f"A{total_row}"].fill = fill(NAVY)
+    ws[f"A{total_row}"].font = hf(); ws[f"A{total_row}"].fill = fl(NH)
     ws[f"A{total_row}"].alignment = Alignment(horizontal="center", vertical="center")
-    ws[f"A{total_row}"].border = border_bottom
-    for c in range(4, 8):
-        ws.cell(total_row, c).fill = fill(NAVY)
-        ws.cell(total_row, c).border = border_bottom
-    ws.row_dimensions[total_row].height = 20
-
-    # Auto-filter
-    ws.auto_filter.ref = f"A4:G{total_row - 1}"
+    ws[f"A{total_row}"].border = bb; ws.row_dimensions[total_row].height = 20
+    ws.auto_filter.ref = f"A4:G{total_row-1}"
 
     # ── Sheet 2 – Synthèse ────────────────────────────────────────────────────
-    ws2 = wb.create_sheet("Synthèse")
-    ws2.sheet_view.showGridLines = False
-
-    ws2.merge_cells("A1:D1")
-    ws2["A1"] = "Synthèse — Journal des Appels"
-    ws2["A1"].font = Font(name="Arial", bold=True, size=13, color=WHITE)
-    ws2["A1"].fill = fill(NAVY)
+    ws2 = wb.create_sheet("Synthèse"); ws2.sheet_view.showGridLines = False
+    ws2.merge_cells("A1:D1"); ws2["A1"] = "Synthèse — Journal des Appels"
+    ws2["A1"].font = hf(13); ws2["A1"].fill = fl(NH)
     ws2["A1"].alignment = Alignment(horizontal="center", vertical="center")
     ws2.row_dimensions[1].height = 32
+    for col, w in [("A",2),("B",30),("C",20),("D",2)]:
+        ws2.column_dimensions[col].width = w
 
-    # KPIs
-    kpi_rows = [
-        ("Date du journal",   date_str),
-        ("Total appels",      metadata.get("total", len(records))),
-        ("Appels répondus",   metadata.get("repondus", sum(1 for r in records if r["Statut"]=="Répondu"))),
-        ("Appels sans réponse", metadata.get("sans_reponse", sum(1 for r in records if r["Statut"]=="Sans réponse"))),
-        ("Taux de réponse",   f"=C4/C3"),
-        ("Durée moy. (répondus)", ""),  # placeholder
+    durations = [r["Durée (s)"] for r in records if r["Durée (s)"] > 0]
+    avg_sec   = int(sum(durations)/len(durations)) if durations else 0
+    kpi_rows  = [
+        ("Date du journal",     date_str),
+        ("Total appels",        tot_n),
+        ("Appels répondus",     rep_n),
+        ("Appels sans réponse", tot_n - rep_n),
+        ("Taux de réponse",     rep_n / max(tot_n, 1)),
+        ("Durée moy. répondus", fmt_seconds(avg_sec)),
     ]
-
-    # Compute average duration
-    durations = []
-    for r in records:
-        d = r.get("Durée", "")
-        if d:
-            parts = d.split(":")
-            try:
-                secs = int(parts[0])*3600 + int(parts[1])*60 + int(parts[2])
-                durations.append(secs)
-            except Exception:
-                pass
-    avg_sec = int(sum(durations)/len(durations)) if durations else 0
-    avg_fmt = f"{avg_sec//60}m {avg_sec%60:02d}s"
-    kpi_rows[-1] = ("Durée moy. (répondus)", avg_fmt)
-
-    ws2.column_dimensions["A"].width = 2
-    ws2.column_dimensions["B"].width = 28
-    ws2.column_dimensions["C"].width = 20
-    ws2.column_dimensions["D"].width = 2
-
-    for i, (label, val) in enumerate(kpi_rows, start=2):
-        # label cell
-        lc = ws2.cell(row=i+1, column=2, value=label)
-        lc.font = Font(name="Arial", size=10, bold=True, color="212121")
-        lc.fill = fill(LIGHT_BG)
-        lc.alignment = Alignment(horizontal="left", vertical="center", indent=1)
-        lc.border = border_data
-        # value cell
-        vc = ws2.cell(row=i+1, column=3, value=val)
-        vc.font = Font(name="Arial", size=10, color="212121")
-        vc.fill = fill(WHITE)
-        vc.alignment = Alignment(horizontal="center", vertical="center")
-        vc.border = border_data
+    for i, (lbl, val) in enumerate(kpi_rows, 2):
+        lc = ws2.cell(i+1, 2, lbl)
+        lc.font = cf(10, True); lc.fill = fl(LB)
+        lc.alignment = Alignment(horizontal="left", vertical="center", indent=1); lc.border = bd
+        vc = ws2.cell(i+1, 3, val)
+        vc.font = cf(10); vc.fill = fl(WH)
+        vc.alignment = Alignment(horizontal="center", vertical="center"); vc.border = bd
         ws2.row_dimensions[i+1].height = 24
-        # Percent format for taux
-        if label == "Taux de réponse":
-            vc.number_format = "0.0%"
-            vc.value = metadata.get("repondus", 0) / max(metadata.get("total", 1), 1)
-            vc.font = Font(name="Arial", size=10, bold=True, color=GREEN)
+        if lbl == "Taux de réponse":
+            vc.number_format = "0.0%"; vc.font = cf(10, True, GH)
 
-    # Hourly distribution table on ws2
-    from collections import Counter
-    hours_ok  = Counter()
-    hours_ko  = Counter()
+    # Répartition horaire
+    ho, hk = Counter(), Counter()
     for r in records:
         h = r["Heure début"][:2] if r["Heure début"] else None
-        if h:
-            if r["Statut"] == "Répondu":
-                hours_ok[h] += 1
-            else:
-                hours_ko[h] += 1
-
-    all_hours = sorted(set(list(hours_ok.keys()) + list(hours_ko.keys())))
-
-    start_row = 11
-    ws2.merge_cells(f"B{start_row}:C{start_row}")
-    ws2[f"B{start_row}"] = "Répartition par heure"
-    ws2[f"B{start_row}"].font = Font(name="Arial", bold=True, size=10, color=WHITE)
-    ws2[f"B{start_row}"].fill = fill(ORANGE)
-    ws2[f"B{start_row}"].alignment = Alignment(horizontal="center")
-    ws2[f"B{start_row}"].border = border_data
-
-    for j, hdr in enumerate(["Heure", "Répondus", "Sans réponse"], start=2):
-        cell = ws2.cell(row=start_row+1, column=j, value=hdr)
-        cell.font = hdr_font()
-        cell.fill = fill(NAVY)
-        cell.alignment = Alignment(horizontal="center")
-        cell.border = border_data
-
-    for k, h in enumerate(all_hours, start=start_row+2):
-        ws2.cell(k, 2, f"{h}h").font = cell_font(bold=True)
-        ws2.cell(k, 2).fill = fill(GREY_BG)
-        ws2.cell(k, 2).alignment = Alignment(horizontal="center")
-        ws2.cell(k, 2).border = border_data
-        ws2.cell(k, 3, hours_ok.get(h, 0)).fill = fill(WHITE)
-        ws2.cell(k, 3).alignment = Alignment(horizontal="center")
-        ws2.cell(k, 3).border = border_data
-        ws2.cell(k, 4, hours_ko.get(h, 0)).fill = fill(WHITE)
-        ws2.cell(k, 4).alignment = Alignment(horizontal="center")
-        ws2.cell(k, 4).border = border_data
+        if h: (ho if r["Statut"]=="Répondu" else hk)[h] += 1
+    all_h = sorted(set(list(ho.keys()) + list(hk.keys())))
+    sr = 11
+    ws2.merge_cells(f"B{sr}:D{sr}"); ws2[f"B{sr}"] = "Répartition horaire"
+    ws2[f"B{sr}"].font = hf(); ws2[f"B{sr}"].fill = fl(OH)
+    ws2[f"B{sr}"].alignment = Alignment(horizontal="center"); ws2[f"B{sr}"].border = bd
+    for j, h in enumerate(["Heure","Répondus","Sans réponse"], 2):
+        c = ws2.cell(sr+1, j, h); c.font = hf(); c.fill = fl(NH)
+        c.alignment = Alignment(horizontal="center"); c.border = bd
+    for k, h in enumerate(all_h, sr+2):
+        ws2.cell(k,2,f"{h}h").font = cf(bold=True)
+        ws2.cell(k,2).fill = fl(GB); ws2.cell(k,2).alignment = Alignment(horizontal="center"); ws2.cell(k,2).border = bd
+        for col, val in [(3, ho.get(h,0)), (4, hk.get(h,0))]:
+            ws2.cell(k,col,val).fill = fl(WH)
+            ws2.cell(k,col).alignment = Alignment(horizontal="center"); ws2.cell(k,col).border = bd
         ws2.row_dimensions[k].height = 18
 
-    # ── Sheet 3 – Inconnus ────────────────────────────────────────────────────
-    ws3 = wb.create_sheet("Numéros inconnus")
-    ws3.sheet_view.showGridLines = False
+    # ── Sheet 3 – Multi-appels ────────────────────────────────────────────────
+    ws3 = wb.create_sheet("Clients multi-appels"); ws3.sheet_view.showGridLines = False
+    ws3.merge_cells("A1:F1")
+    ws3["A1"] = "Clients ayant appelé plusieurs fois dans la journée"
+    ws3["A1"].font = hf(12); ws3["A1"].fill = fl(OH)
+    ws3["A1"].alignment = Alignment(horizontal="center", vertical="center"); ws3.row_dimensions[1].height = 30
+    df_tmp   = pd.DataFrame(records)
+    cli_grp  = df_tmp.groupby("Téléphone").agg(
+        Nom=("Adresse / Client","first"),
+        Appels=("Statut","count"),
+        Rep=("Statut", lambda x: (x=="Répondu").sum()),
+        Dur=("Durée (s)","sum"),
+    ).reset_index()
+    cli_grp = cli_grp[cli_grp["Appels"] > 1].sort_values("Appels", ascending=False)
+    hdrs3 = ["Client","Téléphone","Nb appels","Répondus","Sans réponse","Durée totale"]
+    wds3  = [38, 18, 12, 12, 14, 14]
+    for ci, (h, w) in enumerate(zip(hdrs3, wds3), 1):
+        c = ws3.cell(2, ci, h); c.font = hf(); c.fill = fl(NH)
+        c.alignment = Alignment(horizontal="center"); c.border = bd
+        ws3.column_dimensions[get_column_letter(ci)].width = w
+    ws3.row_dimensions[2].height = 22
+    for ri, (_, row) in enumerate(cli_grp.iterrows(), 3):
+        bg = fl(WH) if ri%2==0 else fl(GB)
+        vals = [row["Nom"], row["Téléphone"], row["Appels"], row["Rep"],
+                row["Appels"]-row["Rep"], fmt_seconds(int(row["Dur"]))]
+        for ci, val in enumerate(vals, 1):
+            cell = ws3.cell(ri, ci, val); cell.fill = bg; cell.border = bd; cell.font = cf()
+            cell.alignment = Alignment(vertical="center", horizontal="center" if ci > 1 else "left")
+        ws3.row_dimensions[ri].height = 17
 
-    ws3.merge_cells("A1:C1")
-    ws3["A1"] = "Numéros absents du répertoire"
-    ws3["A1"].font = Font(name="Arial", bold=True, size=12, color=WHITE)
-    ws3["A1"].fill = fill(RED_SOFT)
-    ws3["A1"].alignment = Alignment(horizontal="center", vertical="center")
-    ws3.row_dimensions[1].height = 30
-
+    # ── Sheet 4 – Numéros inconnus ────────────────────────────────────────────
+    ws4 = wb.create_sheet("Numéros inconnus"); ws4.sheet_view.showGridLines = False
+    ws4.merge_cells("A1:C1"); ws4["A1"] = "Numéros absents du répertoire"
+    ws4["A1"].font = hf(12); ws4["A1"].fill = fl(RH)
+    ws4["A1"].alignment = Alignment(horizontal="center", vertical="center"); ws4.row_dimensions[1].height = 30
     unknowns = [r for r in records if r["Absent répertoire"] == "Oui"]
-    for j, h in enumerate(["Statut", "Heure début", "Téléphone"], start=1):
-        cell = ws3.cell(row=2, column=j, value=h)
-        cell.font = hdr_font()
-        cell.fill = fill(NAVY)
-        cell.alignment = Alignment(horizontal="center")
-        cell.border = border_data
+    for j, h in enumerate(["Statut","Heure début","Téléphone"], 1):
+        c = ws4.cell(2,j,h); c.font=hf(); c.fill=fl(NH)
+        c.alignment=Alignment(horizontal="center"); c.border=bd
+    for col, w in [("A",14),("B",13),("C",20)]:
+        ws4.column_dimensions[col].width = w
+    for i, r in enumerate(unknowns, 3):
+        answered = r["Statut"]=="Répondu"
+        bg = fl(WH) if i%2==0 else fl(GB)
+        ws4.cell(i,1,r["Statut"]).font = Font(name="Arial",size=9,bold=True,color=GH if answered else RH)
+        ws4.cell(i,1).fill=bg; ws4.cell(i,1).alignment=Alignment(horizontal="center"); ws4.cell(i,1).border=bd
+        ws4.cell(i,2,r["Heure début"]).fill=bg; ws4.cell(i,2).alignment=Alignment(horizontal="center"); ws4.cell(i,2).border=bd
+        ws4.cell(i,3,r["Téléphone"]).font=Font(name="Courier New",size=9)
+        ws4.cell(i,3).fill=bg; ws4.cell(i,3).alignment=Alignment(horizontal="center"); ws4.cell(i,3).border=bd
+        ws4.row_dimensions[i].height=18
 
-    ws3.column_dimensions["A"].width = 14
-    ws3.column_dimensions["B"].width = 13
-    ws3.column_dimensions["C"].width = 20
-
-    for i, r in enumerate(unknowns, start=3):
-        answered = r["Statut"] == "Répondu"
-        bg = fill(WHITE) if i % 2 == 0 else fill(GREY_BG)
-        ws3.cell(i, 1, r["Statut"]).font = Font(name="Arial", size=9, bold=True,
-                                                 color=GREEN if answered else RED_SOFT)
-        ws3.cell(i, 1).fill = bg; ws3.cell(i, 1).alignment = Alignment(horizontal="center")
-        ws3.cell(i, 1).border = border_data
-        ws3.cell(i, 2, r["Heure début"]).fill = bg
-        ws3.cell(i, 2).alignment = Alignment(horizontal="center"); ws3.cell(i, 2).border = border_data
-        ws3.cell(i, 3, r["Téléphone"]).font = Font(name="Courier New", size=9)
-        ws3.cell(i, 3).fill = bg; ws3.cell(i, 3).alignment = Alignment(horizontal="center")
-        ws3.cell(i, 3).border = border_data
-        ws3.row_dimensions[i].height = 18
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
+    buf = io.BytesIO(); wb.save(buf); buf.seek(0)
     return buf.read()
 
-
-# ─── UI ──────────────────────────────────────────────────────────────────────
-st.title("📞 Journal des Appels → Excel")
-st.markdown("**Importez un PDF Logimatique** pour obtenir un fichier Excel professionnel structuré en 3 onglets.")
-
+# ═════════════════════════════════════════════════════════════════════════════
+# UI
+# ═════════════════════════════════════════════════════════════════════════════
+st.title("📞 Journal des Appels — Hympyr Energies")
+st.markdown("Importez un **PDF Logimatique** pour obtenir analyses visuelles + export Excel professionnel.")
 st.divider()
 
 uploaded = st.file_uploader(
-    "Déposer le fichier PDF ici",
-    type=["pdf"],
-    help="Journal des appels exporté depuis Logimatique (format HY / HYMPYR)"
+    "Déposer le fichier PDF ici", type=["pdf"],
+    help="Journal des appels exporté depuis Logimatique (format HY / HYMPYR)",
 )
 
-if uploaded:
-    with st.spinner("Analyse du PDF en cours…"):
-        pdf_bytes = uploaded.read()
-        records, metadata = parse_pdf(pdf_bytes)
-
-    if not records:
-        st.error("Aucun appel détecté. Vérifiez que le fichier est un Journal des Appels Logimatique.")
-        st.stop()
-
-    # ── KPI Cards ────────────────────────────────────────────────────────────
-    total     = metadata.get("total", len(records))
-    repondus  = metadata.get("repondus", sum(1 for r in records if r["Statut"]=="Répondu"))
-    sans_rep  = metadata.get("sans_reponse", total - repondus)
-    taux      = repondus / max(total, 1) * 100
-    date_str  = metadata.get("date", "—")
-
-    c1, c2, c3, c4 = st.columns(4)
-    for col, label, val, color in [
-        (c1, "Total appels",    total,     "#1a237e"),
-        (c2, "Répondus",       repondus,  "#2e7d32"),
-        (c3, "Sans réponse",   sans_rep,  "#c62828"),
-        (c4, "Taux de réponse", f"{taux:.1f} %", "#e65100"),
-    ]:
-        col.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value" style="color:{color}">{val}</div>
-            <div class="metric-label">{label}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    st.markdown(f"<br>**Date du journal :** {date_str} &nbsp;|&nbsp; **Société :** {metadata.get('societe','—')}", unsafe_allow_html=True)
-    st.divider()
-
-    # ── DataFrame Preview ─────────────────────────────────────────────────────
-    df = pd.DataFrame(records)
-    
-    tab1, tab2, tab3 = st.tabs(["📋 Tous les appels", "✅ Répondus", "❌ Sans réponse"])
-    with tab1:
-        st.dataframe(df, use_container_width=True, height=420)
-    with tab2:
-        st.dataframe(df[df["Statut"]=="Répondu"], use_container_width=True, height=420)
-    with tab3:
-        st.dataframe(df[df["Statut"]=="Sans réponse"], use_container_width=True, height=420)
-
-    st.divider()
-
-    # ── Export ────────────────────────────────────────────────────────────────
-    with st.spinner("Génération du fichier Excel…"):
-        xlsx_bytes = build_excel(records, metadata, date_str)
-
-    filename = f"Journal_Appels_HYMPYR_{date_str.replace('/','')}.xlsx"
-
-    st.download_button(
-        label="⬇️  Télécharger le fichier Excel",
-        data=xlsx_bytes,
-        file_name=filename,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        type="primary",
-    )
-
-    st.caption(f"Fichier : **{filename}**  ·  3 onglets : Journal complet · Synthèse · Numéros inconnus")
-
-else:
+if not uploaded:
     st.info("👆 Importez un fichier PDF pour commencer.")
     st.markdown("""
-    **Contenu du fichier Excel généré :**
-    - **Onglet 1 – Journal des appels** : tableau complet avec filtre automatique, alternance de lignes, codes couleur Répondu/Sans réponse
-    - **Onglet 2 – Synthèse** : KPIs, taux de réponse, répartition horaire
-    - **Onglet 3 – Numéros inconnus** : liste des appelants absents du répertoire
+    **Ce que vous obtiendrez :**
+    - KPIs synthétiques (total, répondus, taux de réponse, durée moyenne)
+    - Barres empilées par heure + courbe du taux de réponse
+    - Heatmap thermique d'intensité horaire
+    - Top appelants + détection des clients urgents (≥ 3 appels)
+    - Bubble chart multi-appels : intensité × qualité de traitement
+    - Export Excel 4 onglets : Journal · Synthèse · Multi-appels · Inconnus
     """)
+    st.stop()
+
+with st.spinner("Analyse du PDF…"):
+    records, metadata = parse_pdf(uploaded.read())
+
+if not records:
+    st.error("Aucun appel détecté. Vérifiez que le fichier est un Journal des Appels Logimatique.")
+    st.stop()
+
+df        = pd.DataFrame(records)
+total     = metadata.get("total", len(records))
+repondus  = metadata.get("repondus", int((df["Statut"]=="Répondu").sum()))
+sans_rep  = metadata.get("sans_reponse", total - repondus)
+taux      = repondus / max(total, 1) * 100
+date_str  = metadata.get("date", "—")
+durations = df[df["Durée (s)"]>0]["Durée (s)"]
+avg_dur   = fmt_seconds(int(durations.mean())) if not durations.empty else "—"
+
+hourly_df = build_hourly_df(df)
+client_df = build_client_df(df)
+multi_df  = client_df[client_df["Appels"] > 1].copy()
+
+# ── KPI Cards ─────────────────────────────────────────────────────────────────
+c1, c2, c3, c4, c5 = st.columns(5)
+for col, label, val, color in [
+    (c1, "Total appels",     total,             NAVY),
+    (c2, "Répondus",        repondus,           GREEN),
+    (c3, "Sans réponse",    sans_rep,           RED),
+    (c4, "Taux de réponse", f"{taux:.1f} %",    ORANGE),
+    (c5, "Durée moy.",      avg_dur,            "#00695c"),
+]:
+    col.markdown(f"""
+    <div class="metric-card">
+        <div class="metric-value" style="color:{color}">{val}</div>
+        <div class="metric-label">{label}</div>
+    </div>""", unsafe_allow_html=True)
+
+st.markdown(f"<br>**Date :** {date_str} &nbsp;|&nbsp; **Société :** {metadata.get('societe','—')}",
+            unsafe_allow_html=True)
+st.divider()
+
+# ═══════════════════════════════════════════════════════════════
+# SECTION 1 — ANALYSE TEMPORELLE
+# ═══════════════════════════════════════════════════════════════
+st.markdown('<div class="section-title">⏱ Analyse temporelle</div>', unsafe_allow_html=True)
+
+col_a, col_b = st.columns([3, 1])
+with col_a:
+    st.plotly_chart(chart_hourly_bars(hourly_df), use_container_width=True)
+with col_b:
+    peak  = hourly_df.loc[hourly_df["Total"].idxmax()]
+    worst = hourly_df.loc[hourly_df["Taux réponse"].idxmin()]
+    st.markdown("**Insights clés**")
+    st.markdown(f"""
+    <div class="alert-badge">
+    🔴 <b>Pic de charge :</b><br>{peak['Label']} — {int(peak['Total'])} appels<br><br>
+    ⚠️ <b>Pire taux de réponse :</b><br>{worst['Label']} — {worst['Taux réponse']:.0f}%
+    &nbsp;({int(worst['Sans réponse'])} non traités)
+    </div>""", unsafe_allow_html=True)
+    st.markdown("")
+    st.dataframe(
+        hourly_df[["Label","Répondus","Sans réponse","Taux réponse"]]
+        .rename(columns={"Label":"Heure","Taux réponse":"Taux (%)"}),
+        hide_index=True, use_container_width=True, height=220,
+    )
+
+st.plotly_chart(chart_heatmap_intensity(hourly_df), use_container_width=True)
+st.divider()
+
+# ═══════════════════════════════════════════════════════════════
+# SECTION 2 — ANALYSE CLIENTS & MULTI-APPELS
+# ═══════════════════════════════════════════════════════════════
+st.markdown('<div class="section-title">👥 Analyse clients & multi-appels</div>', unsafe_allow_html=True)
+
+# Alerte clients urgents ≥ 3 appels
+urgents = multi_df[multi_df["Appels"] >= 3].sort_values("Appels", ascending=False)
+if not urgents.empty:
+    st.markdown(f"⚠️ **{len(urgents)} client(s) ont appelé ≥ 3 fois** — à recontacter en priorité :")
+    cols_u = st.columns(min(len(urgents), 4))
+    for i, (_, row) in enumerate(urgents.iterrows()):
+        if i >= 4: break
+        cols_u[i].markdown(f"""
+        <div class="client-urgent">
+        <b>{row['Nom'][:28]}</b><br>
+        📞 {row['Téléphone']}<br>
+        {row['Appels']} appels · {row['Taux réponse %']}% répondus
+        </div>""", unsafe_allow_html=True)
+    st.markdown("")
+
+col_c, col_d = st.columns(2)
+with col_c:
+    n_top = st.slider("Nombre de clients à afficher", 5, 30, 15)
+    st.plotly_chart(chart_top_clients(client_df, n_top), use_container_width=True)
+with col_d:
+    bubble = chart_bubble_multi(client_df)
+    if bubble:
+        st.plotly_chart(bubble, use_container_width=True)
+    else:
+        st.info("Aucun client multi-appels détecté.")
+
+if not multi_df.empty:
+    with st.expander(f"📋 Détail des {len(multi_df)} clients multi-appels"):
+        st.dataframe(
+            multi_df[["Nom","Téléphone","Appels","Répondus","Sans réponse","Durée totale","Taux réponse %","Première_heure","Dernière_heure"]]
+            .rename(columns={"Première_heure":"1er appel","Dernière_heure":"Dernier appel"}),
+            hide_index=True, use_container_width=True, height=300,
+        )
+
+st.divider()
+
+# ═══════════════════════════════════════════════════════════════
+# SECTION 3 — JOURNAL BRUT
+# ═══════════════════════════════════════════════════════════════
+st.markdown('<div class="section-title">📋 Journal des appels brut</div>', unsafe_allow_html=True)
+
+display_df = df.drop(columns=["Heure (int)", "Durée (s)"])
+tab1, tab2, tab3 = st.tabs(["Tous les appels", "✅ Répondus", "❌ Sans réponse"])
+with tab1: st.dataframe(display_df, use_container_width=True, height=360)
+with tab2: st.dataframe(display_df[display_df["Statut"]=="Répondu"], use_container_width=True, height=360)
+with tab3: st.dataframe(display_df[display_df["Statut"]=="Sans réponse"], use_container_width=True, height=360)
+
+st.divider()
+
+with st.spinner("Génération Excel…"):
+    xlsx_bytes = build_excel(records, metadata, date_str)
+
+filename = f"Journal_Appels_HYMPYR_{date_str.replace('/','')}.xlsx"
+st.download_button(
+    label="⬇️  Télécharger le fichier Excel (4 onglets)",
+    data=xlsx_bytes,
+    file_name=filename,
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    use_container_width=True,
+    type="primary",
+)
+st.caption(f"**{filename}** · 4 onglets : Journal · Synthèse · Multi-appels · Numéros inconnus")
